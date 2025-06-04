@@ -16,9 +16,10 @@ end_game = threading.Event()
 
 class TCPHandler(SocketServer.BaseRequestHandler):
     def handle(self):
-        # 當有新連線時，加入 connections，並等待遊戲開始
-        players.extend([Player(u"玩家{}".format(len(players)+1))])
-        print("第{}個玩家連線: {}".format(len(players)+1, self.request))
+        player = Player(u"玩家{}".format(len(players)+1))
+        player.set_socket(self.request)
+        players.append(player)
+        print(u"{}已連線".format(player.name))
         if len(players) == 2:
             start_game.set()
         # 等待遊戲結束
@@ -76,10 +77,10 @@ def run_game():
 
             broadcast(u"STATUS %s\n" % current.name, skip_players=[idx])
 
-            send_to(players[idx], "TOOL?\n")
-            choice = recv_from(players[idx])
+            send_to(current, "TOOL\n")
+            choice = recv_from(current)
             if choice is None:
-                broadcast("WINNER %s\n" % opponent.name)
+                broadcast(u"WINNER %s\n" % opponent.name)
                 end_game.set()
                 return
 
@@ -91,43 +92,44 @@ def run_game():
                     tool = current.tool_hand.pop(ci)
                     game.discard_tool.append(tool)
 
-                    send_to(players[idx], "USED_TOOL %s\n" % tool)
+                    send_to(current, "USED_TOOL %s\n" % tool)
+                    broadcast(u"OPP_TOOL %s %s\n" % (current.name, tool), skip_players=[idx])
 
                     # 不同道具對應的流程
                     if tool == "POS":
-                        send_to(players[idx], "POS?\n")
-                        pos_str = recv_from(players[idx])
+                        send_to(current, "POS\n")
+                        pos_str = recv_from(current)
                         if pos_str is None:
                             broadcast("WINNER %s\n" % opponent.name)
                             end_game.set()
                             return
 
                         while not (pos_str.isdigit() and 1 <= int(pos_str) <= game.NUM_GUESS_DIGITS):
-                            send_to(players[idx], "POS?\n")
-                            pos_str = recv_from(players[idx])
+                            send_to(current, "POS\n")
+                            pos_str = recv_from(current)
                             if pos_str is None:
                                 broadcast("WINNER %s\n" % opponent.name)
                                 end_game.set()
                                 return
                         pi = int(pos_str)
                         digit = ToolCard.pos(opponent.answer, pi)
-                        send_to(players[idx], "POS_RESULT %d %s\n" % (pi, digit))
+                        send_to(current, "POS_RESULT %d %s\n" % (pi, digit))
 
                     elif tool == "SHUFFLE":
-                        ToolCard.shuffle(opponent.answer)
-                        send_to(players[idx], "SHUFFLE_RESULT %s\n" % "".join(opponent.answer))
+                        ToolCard.shuffle(current.answer)
+                        send_to(current, "SHUFFLE_RESULT %s\n" % "".join(current.answer))
 
                     elif tool == "EXCLUDE":
                         exclude_result = ToolCard.exclude(opponent.answer)
-                        send_to(players[idx], "EXCLUDE_RESULT %s\n" % exclude_result)
+                        send_to(current, "EXCLUDE_RESULT %s\n" % exclude_result)
 
                     elif tool == "DOUBLE":
                         extra_guess = True
-                        send_to(players[idx], "DOUBLE_ACTIVE\n")
+                        send_to(current, "DOUBLE_ACTIVE\n")
 
                     elif tool == "RESHUFFLE":
                         ToolCard.reshuffle(current.number_hand, game.number_deck)
-                        send_to(players[idx], "RESHUFFLE_DONE\n")
+                        send_to(current, "RESHUFFLE_DONE\n")
                 else:
                     pass
 
@@ -136,10 +138,10 @@ def run_game():
                 # 顯示手牌
                 nums = ",".join(current.number_hand)
                 tools = ",".join(current.tool_hand)
-                send_to(players[idx], "HAND %s;%s\n" % (nums, tools))
+                send_to(current, "HAND %s;%s\n" % (nums, tools))
 
-                send_to(players[idx], "GUESS?\n")
-                guess = recv_from(players[idx])
+                send_to(current, "GUESS %s\n" % hand_nums)
+                guess = recv_from(current)
                 if guess is None:
                     broadcast("WINNER %s\n" % opponent.name)
                     end_game.set()
@@ -151,8 +153,8 @@ def run_game():
 
                 game.draw_up(current)
                 a, b = game.check_guess(opponent.answer, list(guess))
-                send_to(players[idx], "RESULT %d %d\n" % (a, b))
-                send_to(players[1-idx], "OPP_GUESS %s %d %d\n" % (guess, a, b))
+                send_to(current, "RESULT %d %d\n" % (a, b))
+                send_to(players[1-idx], "OPP_GUESS %s %s %d %d\n" % (current, guess, a, b))
 
                 if a == game.NUM_GUESS_DIGITS:
                     broadcast("WINNER %s\n" % current.name)

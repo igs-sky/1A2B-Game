@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import print_function, unicode_literals
 import socket
-import sys
+from package.game import Game
 
 try:
     input = raw_input  # Python 2 使用 raw_input
@@ -17,41 +17,57 @@ def handle_message(msg):
         body = msg[len("HAND "):]
         nums, tools = body.split(";")
         print("你的數字手牌:", ",".join(nums.split(",")))
-        print("你的道具手牌:", ",".join(tools.split(",")))
-    elif cmd == "TOOL?":
-        return input("是否使用道具卡？輸入編號或輸入 -1 跳過: ").strip()
+        print("你的道具手牌:", ",".join(tools.split(",")) + "\n")
+    elif cmd == "TOOL":
+        return input("是否使用道具卡？輸入編號或輸入 -1 跳過:\n").strip()
     elif cmd == "USED_TOOL":
-        print("你使用了道具:", parts[1])
-    elif cmd == "POS?":
-        return input("請輸入要查看的位置 (1~4)：").strip()
+        print("你使用了道具:", parts[1], "\n")
+    elif cmd == "POS":
+        return input("請輸入要查看的位置 (1~4)：\n").strip()
     elif cmd == "POS_RESULT":
-        print("位置 %s 的數字是 %s" % (parts[1], parts[2]))
+        print("位置 %s 的數字是 %s\n" % (parts[1], parts[2]))
     elif cmd == "SHUFFLE_RESULT":
-        print("打亂對方答案數字:", parts[1])
+        print("打亂對方答案數字:", parts[1] + "\n")
     elif cmd == "EXCLUDE_RESULT":
-        print("證明 %s 不在對方答案中" % parts[1])
+        print("數字 %s 不在對方答案中\n" % parts[1])
     elif cmd == "DOUBLE_ACTIVE":
-        print("雙重猜測已啟動，本回合可猜兩次")
+        print("雙重猜測已啟動，本回合可猜兩次\n")
     elif cmd == "RESHUFFLE_DONE":
         print("已經重洗數字手牌\n")
-    elif cmd == "GUESS?":
-        return input("請輸入猜測 (連續輸 4 位數字): ").strip()
+    elif cmd == "GUESS":
+        guess = []
+        number_hand = parts[1]
+
+        while not guess:
+            guess = list(input("請輸入猜測 (連續輸 4 位數字):\n".strip()))
+            if len(guess) != Game.NUM_GUESS_DIGITS:
+                print("長度錯誤，請重新輸入。")
+                guess = []
+                continue
+            if any(d not in number_hand for d in guess):
+                print("有數字不在手牌中，請重新輸入。")
+                guess = []
+                continue
+        return "".join(guess)
     elif cmd == "RESULT":
-        print("你的結果: %sA%sB" % (parts[1], parts[2]))
+        print("你的結果: %sA%sB\n" % (parts[1], parts[2]))
+    elif cmd == "OPP_TOOL":
+        print("%s使用了 %s \n" % (parts[1], parts[2]))
     elif cmd == "OPP_GUESS":
-        print("對手猜了 %s => %sA%sB" % (parts[1], parts[2], parts[3]))
+        print("%s猜了 %s => %sA%sB\n" % (parts[1], parts[2], parts[3], parts[4]))
     elif cmd == "WINNER":
-        print("遊戲結束，勝利者：", parts[1])
+        print("遊戲結束，勝利者：", parts[1], "\n")
         return "exit"
     elif cmd == "DRAW":
-        print("遊戲結束，平局！")
+        print("遊戲結束，平局！\n")
         return "exit"
     elif cmd == "STATUS":
-        print("等待{}使用道具跟猜測中...\n".format(parts[1]))
+        print("等待{}使用道具跟猜測中...\n\n".format(parts[1]))
     else:
         # 其餘訊息
-        print(msg)
+        print(msg + "\n")
     return None
+
 
 try:
     HOST, PORT = "localhost", 12345

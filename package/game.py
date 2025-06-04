@@ -47,22 +47,24 @@ class Game(object):
             player.best_B = 0
             self.draw_up(player)  # 補牌
 
+    @staticmethod
+    def draw(hand, deck, discard, max_hand):
+        while len(hand) < max_hand:
+            if not deck:
+                if not discard:
+                    break
+                deck.extend(discard)
+                del discard[:]
+                random.shuffle(deck)
+            hand.append(deck.pop())
+        hand.sort()
+
     def draw_up(self, player):
-        def draw(hand, deck, discard, max_hand):
-            while len(hand) < max_hand:
-                if not deck:
-                    if not discard:
-                        break
-                    deck.extend(discard)
-                    discard.clear()
-                    random.shuffle(deck)
-                hand.append(deck.pop())
-            hand.sort()
+        Game.draw(player.number_hand, self.number_deck, self.discard_number, self.MAX_NUM_HAND)
+        Game.draw(player.tool_hand, self.tool_deck, self.discard_tool, self.MAX_TOOL_HAND)
 
-        draw(player.number_hand, self.number_deck, self.discard_number, self.MAX_NUM_HAND)
-        draw(player.tool_hand, self.tool_deck, self.discard_tool, self.MAX_TOOL_HAND)
-
-    def check_guess(self, answer, guess):
+    @staticmethod
+    def check_guess(answer, guess):
         # 計算 A 與 B 的數量
         a = sum(a == g for a, g in zip(answer, guess))
         b = len(set(answer) & set(guess)) - a
