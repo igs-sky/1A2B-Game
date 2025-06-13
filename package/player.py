@@ -9,7 +9,7 @@ class Player(object):
         self.best_A = 0
         self.best_B = 0
         self.socket = None
-
+        self.guess_histories = []
     def __str__(self):
         return self.name
 

@@ -1,10 +1,10 @@
 # server.py
 # -*- coding: utf-8 -*-
-from __future__ import print_function
+from __future__ import print_function, unicode_literals
 import threading
 import socket
 from datetime import datetime
-
+import six
 from gevent import monkey; monkey.patch_all()
 import gevent
 from gevent.timeout import Timeout
@@ -51,7 +51,7 @@ class ConnectionManager(object):
         不斷 accept 新連線，為每位玩家建立 Player 物件，
         並啟動兩條綠線程：_cmd_reader、_heartbeat。
         """
-        while not self.end_event.is_set():
+        while True:
             try:
                 client_sock, client_addr = self.listener.accept()
             except Exception:
@@ -97,12 +97,14 @@ class ConnectionManager(object):
                 data = sock.recv(1024)
             except Exception:
                 # recv 出錯視為斷線
-                player.cmd_queue.put({"type": "DISCONNECT"})
+                item = {"type": "DISCONNECT"}
+                player.cmd_queue.put(item)
                 break
 
             if not data:
                 # 客戶端關閉 connection
-                player.cmd_queue.put({"type": "DISCONNECT"})
+                item = {"type": "DISCONNECT"}
+                player.cmd_queue.put(item)
                 break
 
             buffer += data
@@ -110,27 +112,37 @@ class ConnectionManager(object):
             while "\n" in buffer:
                 line, buffer = buffer.split("\n", 1)
                 text = line.decode("utf-8").strip()
-
+                print(format_log("%s - %s" % (player.name, text)))
                 if text == "HEARTBEAT_ACK":
                     player.heartbeat_queue.put(True)
                 else:
                     player.cmd_queue.put({"type": "COMMAND", "data": text})
 
-    def _heartbeat(self, player, interval=2, timeout=5):
+    @staticmethod
+    def send_to(player, msg):
+        msg = msg if isinstance(msg, unicode) else msg.encode("utf-8")
+        try:
+            player.socket.sendall(msg.encode("utf-8"))
+        except socket.error as e:
+            print(format_log("%s - %s" % (player.name, e)))
+            player.socket.close()
+        except Exception as e:
+            print(format_log("%s - %s" % (player.name, e)))
+
+    def _heartbeat(self, player, interval=5, timeout=10):
         """
         每隔 interval 秒發 HEARTBEAT\n，並在 timeout 秒內等待 HEARTBEAT_ACK。
         如果超時或 sendall 失敗，就推入 {'type': 'DISCONNECT'}，結束心跳協程。
         """
 
-        sock = player.socket
         while not self.end_event.is_set():
             try:
-                sock.sendall("HEARTBEAT\n")
+                ConnectionManager.send_to(player, "HEARTBEAT\n")
             except Exception:
                 # 無法傳送心跳 → 視為斷線
-                player.cmd_queue.put({"type": "DISCONNECTED"})
+                item = {"type": "DISCONNECT"}
+                player.cmd_queue.put(item)
                 break
-
             try:
                 with Timeout(timeout):
                     # 等待 HEARTBEAT_ACK 被放入 heartbeat_queue
@@ -138,7 +150,8 @@ class ConnectionManager(object):
 
             except Exception:
                 # 心跳超時或例外 → 視為斷線
-                player.cmd_queue.put({"type": "DISCONNECTED"})
+                item = {"type": "DISCONNECT"}
+                player.cmd_queue.put(item)
                 break
 
             gevent.sleep(interval)
@@ -159,6 +172,14 @@ class ConnectionManager(object):
         except Exception:
             pass
 
+    def handle_disconnect(self, current):
+        if current in self.players:
+            self.players.remove(current)
+
+        if len(self.players) == 1:
+            lone = self.players[0]
+            ConnectionManager.send_to(lone, "WINNER %s\n" % lone.name)
+            self.end_event.set()
 
 class GameHost(object):
     """
@@ -169,39 +190,55 @@ class GameHost(object):
         self.connection_manager = connection_manager
         self.players = connection_manager.players
 
-    def handle_disconnect(self, current):
-        if current in self.players:
-            self.players.remove(current)
-
-        if len(self.players) == 1:
-            lone = self.players[0]
-            lone.socket.sendall(("WINNER %s\n" % lone.name).encode("utf-8"))
-            self.connection_manager.end_event.set()
-
     def broadcast(self, msg, skip_players=None):
         dead = []
         for player in self.players:
-            if skip_players and player in skip_players:
+            if skip_players is not None and player in skip_players:
                 continue
             try:
-                player.socket.sendall(msg.encode('utf-8'))
-            except Exception:
+                ConnectionManager.send_to(player, msg)
+            except Exception as e:
+                print(format_log("Exception - %s" % e))
                 dead.append(player)
+
         for p in dead:
             self.players.remove(p)
 
+    def reset_turn(self):
+        for player in self.players:
+            try:
+                player.socket.close()
+            except Exception:
+                pass
+
+        del self.players[:]
+        self.connection_manager.start_event.clear()
+
+    @staticmethod
+    def save_player_record(player, action):
+        """
+        儲存玩家丟牌和使用道具的紀錄
+        :param player: Player object
+        :param action: str
+        :return:
+        """
+        player.guess_histories.append(action)
+
     def run_game(self):
+
         # 等待兩位玩家都連線後開始
         self.connection_manager.start_event.wait()
+        print(format_log(u"兩位玩家已連線，開始遊戲..."))
 
         # 建立 Game 物件
         game = Game(self.players)
 
         # 發初始手牌給所有玩家
-        for p in self.players:
+        for p in self.players[1:]:
             hand_nums = ",".join(p.number_hand)
             hand_tools = ",".join(p.tool_hand)
-            p.socket.sendall(("HAND %s;%s\n" % (hand_nums, hand_tools)).encode("utf-8"))
+            print(format_log("%s - HAND" % p.name))
+            ConnectionManager.send_to(p, ("HAND %s;%s\n" % (hand_nums, hand_tools)))
 
         current_round = 1
         MAX_ROUNDS = game.MAX_ROUNDS
@@ -210,7 +247,8 @@ class GameHost(object):
             # 如果只剩一位玩家，直接宣告勝利
             if len(self.players) == 1:
                 lone = self.players[0]
-                lone.socket.sendall(("WINNER %s\n" % lone.name).encode("utf-8"))
+                print(format_log("%s - WINNER" % lone.name))
+                ConnectionManager.send_to(lone, "WINNER %s\n" % lone.name)
                 self.connection_manager.end_event.set()
                 return
 
@@ -226,17 +264,21 @@ class GameHost(object):
                 # 發送最新手牌
                 nums = ",".join(current.number_hand)
                 tools = ",".join(current.tool_hand)
-                current.socket.sendall(("HAND %s;%s\n" % (nums, tools)).encode("utf-8"))
+                print(format_log("%s - HAND" % current.name))
+                ConnectionManager.send_to(current, "HAND %s;%s\n" % (nums, tools))
 
                 # 廣播狀態給對手
                 for p in self.players:
                     if p is not current:
-                        p.socket.sendall(("STATUS %s\n" % current.name).encode("utf-8"))
+                        print(format_log("%s - STATUS" % p.name))
+                        ConnectionManager.send_to(p, "STATUS %s\n" % current.name)
 
                 # 道具階段
-                current.socket.sendall("TOOL\n")
+                print(format_log("%s - TOOL" % current.name))
+                ConnectionManager.send_to(current, "TOOL\n")
+
                 try:
-                    msg = current.cmd_queue.get(timeout=15)
+                    msg = current.cmd_queue.get()
                 except Exception:
                     # 超時或例外 → 斷線
                     self.handle_disconnect(current)
@@ -254,23 +296,28 @@ class GameHost(object):
                         print(format_log(u"%s - 使用 %s" % (current.name, tool)))
                         game.discard_tool.append(tool)
 
-                        current.socket.sendall(("USED_TOOL %s\n" % tool).encode("utf-8"))
-                        opponent.socket.sendall(("OPP_TOOL %s %s\n" % (current.name, tool)).encode("utf-8"))
+                        print(format_log("%s - USED_TOOL" % current.name))
+                        ConnectionManager.send_to(current, "USED_TOOL %s\n" % tool)
+                        print(format_log("%s - OPP_TOOL" % opponent.name))
+                        ConnectionManager.send_to(opponent, "OPP_TOOL %s %s\n" % (current.name, tool))
 
                         if tool == "POS":
                             # POS 道具處理
-                            current.socket.sendall("POS\n")
+                            print(format_log("%s - POS" % current.name))
+                            ConnectionManager.send_to(opponent, "POS\n")
                             try:
-                                pos_msg = current.cmd_queue.get(timeout=15)
+                                pos_msg = current.cmd_queue.get()
                             except Exception:
-                                opponent.socket.sendall(("WINNER %s\n" % opponent.name).encode("utf-8"))
+                                print(format_log("%s - WINNER" % opponent.name))
+                                ConnectionManager.send_to(opponent, "WINNER %s\n" % opponent.name)
                                 if current in self.players:
                                     self.players.remove(current)
                                 self.connection_manager.end_event.set()
                                 return
 
                             if pos_msg["type"] == "DISCONNECTED":
-                                opponent.socket.sendall(("WINNER %s\n" % opponent.name).encode("utf-8"))
+                                print(format_log("%s - WINNER" % opponent.name))
+                                ConnectionManager.send_to(opponent, "WINNER %s\n" % opponent.name)
                                 if current in self.players:
                                     self.players.remove(current)
                                 self.connection_manager.end_event.set()
@@ -278,11 +325,12 @@ class GameHost(object):
 
                             pos_str = pos_msg["data"]
                             while not (pos_str.isdigit() and 1 <= int(pos_str) <= game.NUM_GUESS_DIGITS):
-                                current.socket.sendall("POS\n")
+                                ConnectionManager.send_to(current, "POS\n")
                                 try:
-                                    pos_msg = current.cmd_queue.get(timeout=15)
+                                    pos_msg = current.cmd_queue.get()
                                 except Exception:
-                                    opponent.socket.sendall(("WINNER %s\n" % opponent.name).encode("utf-8"))
+                                    print(format_log("%s - WINNER" % opponent.name))
+                                    ConnectionManager.send_to(opponent, "WINNER %s\n" % opponent.name)
                                     if current in self.players:
                                         self.players.remove(current)
                                     self.connection_manager.end_event.set()
@@ -296,36 +344,44 @@ class GameHost(object):
 
                             pi = int(pos_str)
                             digit = ToolCard.pos(opponent.answer, pi)
-                            current.socket.sendall(("POS_RESULT %d %s\n" % (pi, digit)).encode("utf-8"))
+                            print(format_log("%s - POS_RESULT" % current.name))
+                            ConnectionManager.send_to(current, "POS_RESULT %d %s\n" % (pi, digit))
 
                         elif tool == "SHUFFLE":
                             ToolCard.shuffle(current.answer)
-                            current.socket.sendall(("SHUFFLE_RESULT %s\n" % "".join(current.answer)).encode("utf-8"))
+                            print(format_log("%s - SHUFFLE_RESULT" % current.name))
+                            ConnectionManager.send_to(current, "SHUFFLE_RESULT %s\n" % "".join(current.answer))
 
                         elif tool == "EXCLUDE":
                             exclude_result = ToolCard.exclude(opponent.answer)
-                            current.socket.sendall(("EXCLUDE_RESULT %s\n" % exclude_result).encode("utf-8"))
+                            print(format_log("%s - EXCLUDE_RESULT" % current.name))
+                            ConnectionManager.send_to(current, "EXCLUDE_RESULT %s\n" % exclude_result)
 
                         elif tool == "DOUBLE":
                             extra_guess = True
-                            current.socket.sendall("DOUBLE_ACTIVE\n")
+                            print(format_log("%s - DOUBLE_ACTIVE" % current.name))
+                            ConnectionManager.send_to(current, "DOUBLE_ACTIVE\n")
 
                         elif tool == "RESHUFFLE":
                             ToolCard.reshuffle(current.number_hand, game.number_deck)
-                            current.socket.sendall("RESHUFFLE_DONE\n")
+                            print(format_log("%s - RESHUFFLE_DONE" % current.name))
+                            ConnectionManager.send_to(current, "RESHUFFLE_DONE\n")
 
                 # 猜測階段
                 guesses = 2 if extra_guess else 1
                 for _ in range(guesses):
                     nums = ",".join(current.number_hand)
                     tools = ",".join(current.tool_hand)
-                    current.socket.sendall(("HAND %s;%s\n" % (nums, tools)).encode("utf-8"))
-                    current.socket.sendall(("GUESS %s\n" % nums).encode("utf-8"))
+                    print(format_log("%s - HAND" % current.name))
+                    ConnectionManager.send_to(current, "HAND %s;%s\n" % (nums, tools))
+                    print(format_log("%s - GUESS" % current.name))
+                    ConnectionManager.send_to(current, "GUESS %s\n" % nums)
 
                     try:
-                        guess_msg = current.cmd_queue.get(timeout=15)
+                        guess_msg = current.cmd_queue.get()
                     except Exception:
-                        opponent.socket.sendall(("WINNER %s\n" % opponent.name).encode("utf-8"))
+                        print(format_log("%s - WINNER" % opponent.name))
+                        ConnectionManager.send_to(opponent, "WINNER %s\n" % opponent.name)
                         if current in self.players:
                             self.players.remove(current)
                         self.connection_manager.end_event.set()
@@ -342,23 +398,24 @@ class GameHost(object):
                         game.discard_number.append(d)
                     game.draw_up(current)
                     a, b = game.check_guess(opponent.answer, list(guess))
-                    current.socket.sendall(("RESULT %d %d\n" % (a, b)).encode("utf-8"))
-                    opponent.socket.sendall(("OPP_GUESS %s %s %d %d\n" %
-                                              (current.name, guess, a, b)).encode("utf-8"))
+                    print(format_log("%s - RESULT" % current.name))
+                    ConnectionManager.send_to(current, "RESULT %d %d\n" % (a, b))
+                    print(format_log("%s - OPP_GUESS" % opponent.name))
+                    ConnectionManager.send_to(opponent, "OPP_GUESS %s %s %d %d\n" % (current.name, guess, a, b))
 
                     if a == game.NUM_GUESS_DIGITS:
                         # 猜中，全部玩家廣播勝利
-                        for p in self.players:
-                            p.socket.sendall(("WINNER %s\n" % current.name).encode("utf-8"))
-                        self.connection_manager.end_event.set()
+                        self.broadcast("WINNER %s\n" % current.name)
+                        print(format_log("%s - WINNER" % "BROADCAST"))
+                        self.reset_turn()
                         return
 
             current_round += 1
 
         # 所有回合跑完，沒人猜中 → 平局
         for p in self.players:
-            p.socket.sendall("DRAW\n")
-        self.connection_manager.end_event.set()
+            ConnectionManager.send_to(p, "DRAW\n")
+        self.reset_turn()
 
 
 if __name__ == "__main__":
@@ -371,14 +428,8 @@ if __name__ == "__main__":
     server_thread.start()
     print(format_log(u"伺服器已啟動 %s:%d" % (HOST, PORT)))
 
-    # 等兩名玩家都連上
-    connection_manager.start_event.wait()
-    print(format_log(u"兩位玩家已連線，開始遊戲..."))
-
     game_host = GameHost(connection_manager)
-    game_host.run_game()
 
-    # 遊戲結束後關閉 listener 與所有協程
-    connection_manager.shutdown()
-    server_thread.join(timeout=1)
-    print(format_log(u"遊戲結束，伺服器已關閉"))
+    # 等兩名玩家都連上
+    while True:
+        game_host.run_game()

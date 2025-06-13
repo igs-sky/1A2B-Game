@@ -1,0 +1,4 @@
+package/*.pyc
+package/__pycache__/
+.idea
+*.iml
