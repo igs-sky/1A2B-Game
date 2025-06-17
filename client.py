@@ -244,7 +244,6 @@ if __name__ == "__main__":
     try:
         sock.connect((HOST, PORT))
         print("伺服器建立連線成功…")
-        sock.sendall(("HELLO " + PLAYER_ID + "\n").encode("utf-8"))
 
         t_recv = threading.Thread(target=recv_and_handle, args=(sock,))
         t_recv.start()
