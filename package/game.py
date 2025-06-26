@@ -3,6 +3,8 @@ from __future__ import print_function
 import random
 import sys
 
+from package.player import Player
+
 try:
     input = raw_input
 except NameError:
@@ -23,8 +25,13 @@ class Game(object):
     NUM_GUESS_DIGITS = 4
 
     def __init__(self, players):
+        self.discard_tool = None
+        self.discard_number = None
+        self.tool_deck = None
+        self.number_deck = None
+        
         self.players = players
-        self.current_round = 1
+        self.round = 1
         self.current_player_idx = 0
         self.build_decks()
         self.deal_initial_hands()
@@ -69,6 +76,50 @@ class Game(object):
         a = sum(a == g for a, g in zip(answer, guess))
         b = len(set(answer) & set(guess)) - a
         return a, b
+
+    def to_dict(self):
+        """
+        將 Game 物件轉換為可儲存到 Redis 的 dict 格式。
+
+        :return: dict 包含遊戲當前狀態，包括牌堆、棄牌堆、回合數、參數設定、所有玩家資訊。
+                 - number_deck: 剩餘數字卡牌堆
+                 - tool_deck: 剩餘道具卡牌堆
+                 - discard_number: 已棄用的數字卡牌
+                 - discard_tool: 已棄用的道具卡牌
+                 - round: 當前遊戲進行到的回合數
+                 - MAX_ROUNDS: 遊戲總回合數上限
+                 - NUM_GUESS_DIGITS: 每次猜測的數字長度
+                 - players: 玩家狀態清單（每個 player 會呼叫其自身的 to_dict()）
+        """
+        return {
+            "number_deck": self.number_deck,
+            "tool_deck": self.tool_deck,
+            "discard_number": self.discard_number,
+            "discard_tool": self.discard_tool,
+            "round": self.round,
+            "MAX_ROUNDS": self.MAX_ROUNDS,
+            "NUM_GUESS_DIGITS": self.NUM_GUESS_DIGITS,
+            "players": [p.to_dict() for p in self.players],
+        }
+
+    @classmethod
+    def from_dict(cls, state_dict, players=None):
+
+        if players is None:
+            if state_dict['players']:
+                players = [Player.from_dict(p) for p in state_dict['players']]
+            else:
+                raise Exception('No players specified')
+
+        game = cls(players)
+        game.number_deck = state_dict.get("number_deck", [])
+        game.tool_deck = state_dict.get("tool_deck", [])
+        game.discard_number = state_dict.get("discard_number", [])
+        game.discard_tool = state_dict.get("discard_tool", [])
+        game.round = state_dict.get("round", 1)
+        game.MAX_ROUNDS = state_dict.get("MAX_ROUNDS", Game.MAX_ROUNDS)
+        game.NUM_GUESS_DIGITS = state_dict.get("NUM_GUESS_DIGITS", Game.NUM_GUESS_DIGITS)
+        return game
 
     # def apply_tool(self, player, opponent):
     #     if not player.tool_hand:

@@ -52,7 +52,7 @@ def handle_message(msg):
     elif cmd == "TOOL":
         choices = [str(c + 1) for c in range(Game.MAX_TOOL_HAND)]
         choices.append(str(-1))
-        prompt_text = u"是否使用道具卡？輸入編號或輸入 -1 跳過:\n"
+        prompt_text = "是否使用道具卡？輸入編號或輸入 -1 跳過:\n"
         prompt_queue.put({"type": "TOOL", "prompt": prompt_text, "choices": choices})
         return None
 
@@ -92,7 +92,7 @@ def handle_message(msg):
 
     elif cmd == "GUESS":
         number_hand = parts[1]
-        prompt_text = u"請輸入猜測 (連續輸 4 位數字):\n"
+        prompt_text = "請輸入猜測 (連續輸 4 位數字):\n"
         prompt_queue.put({"type": "GUESS", "prompt": prompt_text, "number_hand": number_hand})
         return None
 
@@ -135,6 +135,9 @@ def handle_message(msg):
         print("等待 {} 使用道具跟猜測中...\n".format(parts[1]))
         return None
 
+    elif cmd == "CHECK_ID":
+        return PLAYER_ID
+
     elif cmd == "FULL":
         print("房間人數已滿~\n")
         return None
@@ -145,7 +148,7 @@ def handle_message(msg):
 
 
 def recv_and_handle(client_socket):
-    _buffer = b""
+    _buffer = ""
     while True:
         try:
             data = client_socket.recv(1024).decode("utf-8")
@@ -252,6 +255,7 @@ if __name__ == "__main__":
         t_input.start()
 
         t_recv.join()
+        t_input.join()
 
     except Exception:
         print("與伺服器連線異常…")
