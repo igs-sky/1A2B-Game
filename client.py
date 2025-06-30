@@ -38,10 +38,10 @@ def handle_message(msg):
     if cmd == "HAND":
         body = msg[len("HAND "):]
         nums, tools = body.split(";")
-        if os.name == "nt":
-            os.system("cls")
-        else:
-            os.system("clear")
+        # if os.name == "nt":
+        #     os.system("cls")
+        # else:
+        #     os.system("clear")
 
         for history in guess_histories:
             print(history)

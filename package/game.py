@@ -99,6 +99,7 @@ class Game(object):
             "round": self.round,
             "MAX_ROUNDS": self.MAX_ROUNDS,
             "NUM_GUESS_DIGITS": self.NUM_GUESS_DIGITS,
+            "current_player_idx": self.current_player_idx,
             "players": [p.to_dict() for p in self.players],
         }
 
@@ -119,6 +120,8 @@ class Game(object):
         game.round = state_dict.get("round", 1)
         game.MAX_ROUNDS = state_dict.get("MAX_ROUNDS", Game.MAX_ROUNDS)
         game.NUM_GUESS_DIGITS = state_dict.get("NUM_GUESS_DIGITS", Game.NUM_GUESS_DIGITS)
+        game.current_player_idx = state_dict.get("current_player_idx", 0)
+
         return game
 
     # def apply_tool(self, player, opponent):

@@ -14,6 +14,7 @@ class Player(object):
         self.heartbeat_queue = None
 
         self.socket = None
+        self.address = None
         self.is_alive = False
 
     def to_dict(self):

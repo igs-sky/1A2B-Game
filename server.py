@@ -2,6 +2,8 @@
 # -*- coding: utf-8 -*-
 
 from __future__ import print_function, unicode_literals
+
+import json
 import threading
 import socket
 import time
@@ -62,44 +64,63 @@ class ConnectionManager(object):
         """
         print(format_log("伺服器已啟動，開始接受連線…"))
         while True:
-            client_sock, client_addr = self.listener.accept()
-            client_sock.sendall(b"CHECK_ID\n")
-            player_id = client_sock.recv(1024).strip()
-
-            # 建立 Player
-            # TODO: 讓玩家的連線帶有 id 的參數 (如果有的話)
-            player = Player(player_id)
-            player.socket = client_sock
-            player.address = client_addr
-            player.cmd_queue = queue.Queue()
-            player.heartbeat_queue = queue.Queue()
-            player.is_alive = True
-
-            # 啟動讀命令執行緒
-            t1 = threading.Thread(target=self._cmd_reader, args=(player,))
-            t1.daemon = True
-            t1.start()
-            # 啟動心跳檢測執行緒
-            t2 = threading.Thread(target=self._heartbeat, args=(player,))
-            t2.daemon = True
-            t2.start()
+            client_socket, client_address = self.listener.accept()
+            client_socket.sendall(b"CHECK_ID\n")
+            player_id = client_socket.recv(1024).strip()
 
             game_session_id = self._redis_handler.read_player_game(player_id)
             if game_session_id is None:
-                # 推入等待佇列，交給配對器
+                self._redis_handler.delete_game_state(game_session_id)
+                player = self._init_player_connection(Player(player_id), client_socket, client_address)
                 self._waiting_queue.put(player)
                 print(format_log("%s 已連線，放入等待佇列" % player.name))
+
             else:
+                print(format_log("%s 正在重新連回 %s" % (player_id, game_session_id)))
                 if game_session_id in self.active_sessions:
                     session = self.active_sessions[game_session_id]
+                    print(format_log("%s 已找到斷線房間 %s" % (player_id, game_session_id)))
                     for i in range(len(session.players)):
-                        if session.players[i].name == player.name:
+                        player = session.players[i]
+                        if player.name == player_id:
+                            player = self._init_player_connection(player, client_socket, client_address)
                             session.players[i] = player
+                            print(format_log("%s 已重新連線" % player.name))
+
+                            nums = ",".join(player.number_hand)
+                            tools = ",".join(player.tool_hand)
+                            print(format_log("%s - HAND" % player.name))
+                            ConnectionManager.send_to(player, "HAND %s;%s\n" % (nums, tools))
                             break
                 else:
-                    self._redis_handler.delete_game_state(game_session_id)
-                    self._waiting_queue.put(player)
-                    print(format_log("%s 已連線，放入等待佇列" % player.name))
+                    # 從 redis 復原 game session
+                    game_state = self._redis_handler.read_game_state(game_session_id)
+                    # print(format_log("%s 正在從 Redis 復原資料:\n %s" % (player_id, game_state)))
+                    session = GameSession(Game.from_dict(game_state), game_session_id)
+                    for p in session.players:
+                        if p.name == player_id:
+                            self._init_player_connection(p, client_socket, client_address)
+                            break
+                    self.match_maker(session)
+
+    def _init_player_connection(self, player, client_socket, client_address):
+        # 建立 Player
+        player.socket = client_socket
+        player.address = client_address
+        player.cmd_queue = queue.Queue()
+        player.heartbeat_queue = queue.Queue()
+        player.is_alive = True
+
+        # 啟動讀命令執行緒
+        t1 = threading.Thread(target=self._cmd_reader, args=(player,))
+        t1.daemon = True
+        t1.start()
+        # 啟動心跳檢測執行緒
+        t2 = threading.Thread(target=self._heartbeat, args=(player,))
+        t2.daemon = True
+        t2.start()
+
+        return player
 
     def _cmd_reader(self, player):
         """
@@ -160,13 +181,35 @@ class ConnectionManager(object):
                 return
             time.sleep(interval)
 
+    def match_maker(self, game_session=None):
+        """不斷配對兩人一組，並開 Thread 執行"""
+        if game_session is not None:
+            self.active_sessions[str(game_session.id)] = game_session
+            print(format_log("重新啟動遊戲房間: %s" % ",".join([p.name for p in game_session.players])))
+            t = threading.Thread(target=game_session.run, )
+            t.daemon = True
+            t.start()
+            return
+
+        while True:
+            p1 = self._waiting_queue.get()
+            p2 = self._waiting_queue.get()
+            game_session = GameSession(Game([p1, p2]))
+
+            self.active_sessions[str(game_session.id)] = game_session
+            print(format_log("配對 %s 和 %s 到新遊戲房間" % (p1.name, p2.name)))
+            t = threading.Thread(target=game_session.run, )
+            t.daemon = True
+            t.start()
+
 
 class GameSession(object):
     """一對玩家的遊戲執行個體（Threaded）"""
-    def __init__(self, p1, p2):
-        self.players = [p1, p2]
+    def __init__(self, game, session_id=None):
+        self.players = game.players
+        self.game = game
         self._store_handler = RedisStore()
-        self._id = uuid4()
+        self.id = uuid4() if session_id is None else session_id
 
     def _handle_disconnect(self, player):
         print(format_log("%s - DISCONNECTED" % player.name))
@@ -183,15 +226,17 @@ class GameSession(object):
             ConnectionManager.send_to(p, msg)
 
     def _end_turn(self, game_state):
-        self._store_handler.save_game_state(self._id, game_state)
+        self._store_handler.save_game_state(self.id, game_state)
 
     def _close_game(self):
-        self._store_handler.delete_game_state(self._id)
+        self._store_handler.delete_game_state(self.id)
+        # print("Close game: %s" % self.players)
         for p in self.players:
             p.socket.close()
 
     def _get_cmd(self, player):
         try:
+            # TODO: 重連後，會一直重 empty queue 取資料，結果執行了 exception block
             msg = player.cmd_queue.get()
         except Exception:
             self._handle_disconnect(player)
@@ -204,10 +249,10 @@ class GameSession(object):
         return msg
 
     def run(self):
-        game = Game(self.players)
-        self._store_handler.save_game_state(self._id, game.to_dict())
+        game = self.game
+        self._store_handler.save_game_state(self.id, game.to_dict())
         for player in self.players:
-            self._store_handler.save_player_game(player.name, str(self._id))
+            self._store_handler.save_player_game(player.name, str(self.id))
 
         # 發初始手牌
         for p in self.players[1:]:
@@ -218,9 +263,13 @@ class GameSession(object):
         # 回合循環
         while game.round < game.MAX_ROUNDS:
             if len(self.players) < 2:
+                print(format_log("房間人數低於2人"))
                 break
 
-            for idx in range(len(self.players)):
+
+            while game.current_player_idx < len(self.players):
+
+                idx = game.current_player_idx
                 current  = self.players[idx]
                 opponent = self.players[(idx+1) % 2]
 
@@ -242,6 +291,7 @@ class GameSession(object):
 
                 msg = self._get_cmd(current)
                 if msg is None:
+                    game.current_player_idx += 1
                     continue
 
                 extra_guess = False
@@ -333,7 +383,10 @@ class GameSession(object):
                         self._close_game()
                         return
 
-            self._end_turn(game.to_dict())
+                game.current_player_idx += 1
+                self._end_turn(game.to_dict())
+
+            game.current_player_idx = 0
             game.round += 1
 
         # 所有回合跑完，沒人猜中 → 平局
@@ -341,26 +394,14 @@ class GameSession(object):
             ConnectionManager.send_to(p, "DRAW\n")
         self._close_game()
 
-
-def match_maker(conn_mgr):
-    """不斷配對兩人一組，並開 Thread 執行"""
-    while True:
-        p1 = conn_mgr._waiting_queue.get()
-        p2 = conn_mgr._waiting_queue.get()
-        session = GameSession(p1, p2)
-        conn_mgr.active_sessions[str(session._id)] = session
-        print(format_log("配對到 %s 和 %s，啟動新遊戲房間" % (p1.name, p2.name)))
-        t = threading.Thread(target=session.run)
-        t.daemon = True
-        t.start()
-
-
 if __name__ == "__main__":
     HOST, PORT = '0.0.0.0', 12345
     connection_manager = ConnectionManager(HOST, PORT)
+
     # 啟動配對器 thread
-    mt = threading.Thread(target=match_maker, args=(connection_manager,))
+    mt = threading.Thread(target=connection_manager.match_maker)
     mt.daemon = True
     mt.start()
+
     # 啟動伺服器
     connection_manager.serve_forever()
