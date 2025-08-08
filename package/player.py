@@ -8,7 +8,7 @@ class Player(object):
         self.tool_hand = []     # players draw tool cards
         self.best_A = 0
         self.best_B = 0
-        self.guess_histories = []
+        self.action_histories = []
 
         self.cmd_queue = None
         self.heartbeat_queue = None
@@ -25,8 +25,11 @@ class Player(object):
             "tool_hand": self.tool_hand,
             "best_A": self.best_A,
             "best_B": self.best_B,
-            "guess_histories": self.guess_histories,
+            "action_histories": self.action_histories,
         }
+
+    def add_action_history(self, action):
+        self.action_histories.append({"action": action})
 
     @classmethod
     def from_dict(cls, data):
@@ -36,7 +39,7 @@ class Player(object):
         player.tool_hand = data.get("tool_hand", [])
         player.best_A = data.get("best_A", 0)
         player.best_B = data.get("best_B", 0)
-        player.guess_histories = data.get("guess_histories", [])
+        player.action_histories = data.get("action_histories", [])
         return player
 
     def __str__(self):

@@ -19,13 +19,15 @@ ENCODING = sys.stdout.encoding or 'utf-8'
 ID_FILE = "player_id.txt"
 
 # 嘗試讀取或建立 UUID
-if os.path.exists(ID_FILE):
-    with open(ID_FILE, "r") as f:
-        PLAYER_ID = f.read().strip()
-else:
-    PLAYER_ID = str(uuid.uuid4())
-    with open(ID_FILE, "w") as f:
-        f.write(PLAYER_ID)
+# if os.path.exists(ID_FILE):
+#     with open(ID_FILE, "r") as f:
+#         PLAYER_ID = f.read().strip()
+# else:
+#     PLAYER_ID = str(uuid.uuid4())
+#     with open(ID_FILE, "w") as f:
+#         f.write(PLAYER_ID)
+
+PLAYER_ID = 'Player2'.encode("utf-8")
 
 # 用來在收到需要玩家回覆的指令時，把 prompt 推到這個隊列
 prompt_queue = queue.Queue()
@@ -45,6 +47,7 @@ def handle_message(msg):
 
         for history in guess_histories:
             print(history)
+
         print("你的數字手牌:", ",".join(nums.split(",")))
         print("你的道具手牌:", ",".join(tools.split(",")) + "\n")
         return None
@@ -52,7 +55,7 @@ def handle_message(msg):
     elif cmd == "TOOL":
         choices = [str(c + 1) for c in range(Game.MAX_TOOL_HAND)]
         choices.append(str(-1))
-        prompt_text = "是否使用道具卡？輸入編號或輸入 -1 跳過:\n"
+        prompt_text = u"是否使用道具卡？輸入編號或輸入 -1 跳過:\n"
         prompt_queue.put({"type": "TOOL", "prompt": prompt_text, "choices": choices})
         return None
 
@@ -67,15 +70,15 @@ def handle_message(msg):
         return None
 
     elif cmd == "POS_RESULT":
-        msg = "位置 %s 的數字是 %s\n" % (parts[1], parts[2])
+        msg = "位置 %s 的數字是 %s" % (parts[1], parts[2])
         guess_histories.append(msg)
-        print(msg)
+        print(msg + "\n")
         return None
 
     elif cmd == "SHUFFLE_RESULT":
-        msg = "打亂對方答案數字: %s\n" % parts[1]
+        msg = "打亂對方答案數字: %s" % parts[1]
         guess_histories.append(msg)
-        print(msg)
+        print(msg + "\n")
         return None
 
     elif cmd == "EXCLUDE_RESULT":
@@ -102,7 +105,7 @@ def handle_message(msg):
         return None
 
     elif cmd == "OPP_TOOL":
-        msg = "%s 使用了 %s\n" % (parts[1], parts[2])
+        msg = "%s 使用了 %s" % (parts[1], parts[2])
         print(msg)
         if parts[2] == "SHUFFLE":
             guess_histories.append(msg)

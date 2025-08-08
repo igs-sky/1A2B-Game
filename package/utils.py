@@ -1,3 +1,7 @@
+# coding=utf-8
+from datetime import datetime
+
+
 def safe_call(func):
     def wrapper(*args, **kwargs):
         try:
@@ -9,3 +13,8 @@ def safe_call(func):
             print("Exception in %s: %s" % (func.__name__, e))
             return None
     return wrapper
+
+def format_log(msg):
+    """回傳帶時間戳的 log 字串。"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    return u"[{}] {}".format(timestamp, msg)

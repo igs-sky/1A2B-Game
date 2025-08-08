@@ -14,6 +14,7 @@ from uuid import uuid4
 from package.game import ToolCard, Game
 from package.player import Player
 from package.redis_store import RedisStore
+from package.utils import format_log
 
 # Python2/3 兼容 Queue
 try:
@@ -27,10 +28,7 @@ except ImportError:
     import socketserver as SocketServer  # Python 3
 
 
-def format_log(msg):
-    """回傳帶時間戳的 log 字串。"""
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    return u"[{}] {}".format(timestamp, msg)
+
 
 
 class ConnectionManager(object):
@@ -65,10 +63,12 @@ class ConnectionManager(object):
         print(format_log("伺服器已啟動，開始接受連線…"))
         while True:
             client_socket, client_address = self.listener.accept()
-            client_socket.sendall(b"CHECK_ID\n")
+            print(format_log("client_socket={}, client_address={}".format(client_socket, client_address)))
+            client_socket.sendall("CHECK_ID\n".encode("utf-8"))
             player_id = client_socket.recv(1024).strip()
-
+            print(format_log("player_id={}".format(player_id)))
             game_session_id = self._redis_handler.read_player_game(player_id)
+            print(format_log("game_session_id={}".format(game_session_id)))
             if game_session_id is None:
                 self._redis_handler.delete_game_state(game_session_id)
                 player = self._init_player_connection(Player(player_id), client_socket, client_address)
@@ -86,11 +86,7 @@ class ConnectionManager(object):
                             player = self._init_player_connection(player, client_socket, client_address)
                             session.players[i] = player
                             print(format_log("%s 已重新連線" % player.name))
-
-                            nums = ",".join(player.number_hand)
-                            tools = ",".join(player.tool_hand)
-                            print(format_log("%s - HAND" % player.name))
-                            ConnectionManager.send_to(player, "HAND %s;%s\n" % (nums, tools))
+                            ConnectionManager._send_last_action(player)
                             break
                 else:
                     # 從 redis 復原 game session
@@ -100,8 +96,22 @@ class ConnectionManager(object):
                     for p in session.players:
                         if p.name == player_id:
                             self._init_player_connection(p, client_socket, client_address)
+                            ConnectionManager._send_last_action(p)
                             break
                     self.match_maker(session)
+
+    @staticmethod
+    def _send_last_action(player):
+        nums = ",".join(player.number_hand)
+        tools = ",".join(player.tool_hand)
+        print(format_log("%s - HAND" % player.name))
+        ConnectionManager.send_to(player, "HAND %s;%s\n" % (nums, tools))
+
+
+        if len(player.action_histories) > 0:
+            last_action = player.action_histories[-1]["action"]
+            print(format_log("%s - %s" % (player.name, last_action[:-1])))
+            ConnectionManager.send_to(player, last_action)
 
     def _init_player_connection(self, player, client_socket, client_address):
         # 建立 Player
@@ -125,7 +135,7 @@ class ConnectionManager(object):
     def _cmd_reader(self, player):
         """
         永遠從 socket.recv() 讀資料：
-          - 收到空 bytes → 推入 DISCONNECT
+          - 收到空 bytes → 推入 DISCONNECTED
           - 收到 HEARTBEAT_ACK → heartbeat_queue
           - 否則推入 cmd_queue
         """
@@ -135,10 +145,10 @@ class ConnectionManager(object):
             try:
                 data = sock.recv(1024)
             except Exception:
-                player.cmd_queue.put({'type': 'DISCONNECT'})
+                player.cmd_queue.put({'type': 'DISCONNECTED'})
                 return
             if not data:
-                player.cmd_queue.put({'type': 'DISCONNECT'})
+                player.cmd_queue.put({'type': 'DISCONNECTED'})
                 return
             buf += data
             while b"\n" in buf:
@@ -151,8 +161,12 @@ class ConnectionManager(object):
 
     @staticmethod
     def send_to(player, msg):
-        if not isinstance(msg, six.text_type):
+        if isinstance(msg, (dict, list)):
+            msg = json.dumps(msg)  # 轉成 JSON 字串
+        elif isinstance(msg, six.binary_type):  # bytes → decode 成 unicode
             msg = msg.decode('utf-8')
+        elif not isinstance(msg, six.text_type):  # 其他不可辨識型別
+            msg = unicode(msg) if six.PY2 else str(msg)
         try:
             player.socket.sendall(msg.encode('utf-8'))
         except Exception:
@@ -164,7 +178,7 @@ class ConnectionManager(object):
     def _heartbeat(self, player, interval=5, timeout=10):
         """
         每隔 interval 秒發 HEARTBEAT，並在 timeout 秒內等 ACK；
-        否則推入 DISCONNECT。
+        否則推入 DISCONNECTED。
         """
         while True:
             try:
@@ -216,9 +230,6 @@ class GameSession(object):
         self.broadcast("DISCONNECTED %s\n" % player.name, skip=player)
         player.is_alive = False
 
-        if len(self.players) < 2:
-            ConnectionManager.send_to(player, "WINNER\n")
-
     def broadcast(self, msg, skip=None):
         for p in self.players:
             if p is skip:
@@ -236,7 +247,6 @@ class GameSession(object):
 
     def _get_cmd(self, player):
         try:
-            # TODO: 重連後，會一直重 empty queue 取資料，結果執行了 exception block
             msg = player.cmd_queue.get()
         except Exception:
             self._handle_disconnect(player)
@@ -266,7 +276,6 @@ class GameSession(object):
                 print(format_log("房間人數低於2人"))
                 break
 
-
             while game.current_player_idx < len(self.players):
 
                 idx = game.current_player_idx
@@ -287,6 +296,7 @@ class GameSession(object):
 
                 # 道具階段
                 print(format_log("%s - TOOL" % current.name))
+                current.add_action_history(action="TOOL\n")
                 ConnectionManager.send_to(current, "TOOL\n")
 
                 msg = self._get_cmd(current)
@@ -297,58 +307,58 @@ class GameSession(object):
                 extra_guess = False
                 if msg["type"] == "COMMAND" and msg["data"].isdigit():
                     ci = int(msg["data"]) - 1
-                    if 0 <= ci < len(current.tool_hand):
-                        tool = current.tool_hand.pop(ci)
-                        print(format_log(u"%s - 使用 %s" % (current.name, tool)))
-                        game.discard_tool.append(tool)
+                    tool = current.tool_hand.pop(ci)
+                    print(format_log(u"%s - 使用 %s" % (current.name, tool)))
+                    game.discard_tool.append(tool)
 
-                        print(format_log("%s - USED_TOOL" % current.name))
-                        ConnectionManager.send_to(current, "USED_TOOL %s\n" % tool)
-                        print(format_log("BROADCAST(skip %s) - OPP_TOOL" % current.name))
-                        self.broadcast("OPP_TOOL %s %s\n" % (current.name, tool), skip=current)
+                    print(format_log("%s - USED_TOOL" % current.name))
+                    ConnectionManager.send_to(current, "USED_TOOL %s\n" % tool)
+                    print(format_log("BROADCAST(skip %s) - OPP_TOOL" % current.name))
+                    self.broadcast("OPP_TOOL %s %s\n" % (current.name, tool), skip=current)
 
-                        if tool == "POS":
-                            # POS 道具處理
-                            print(format_log("BROADCAST(skip %s) - POS" % current.name))
-                            self.broadcast("POS %s %s\n" % (current.name, tool), skip=current)
+                    if tool == "POS":
+                        # POS 道具處理
+                        print(format_log("%s - POS" % current.name))
+                        current.add_action_history(action="POS\n")
+                        ConnectionManager.send_to(current, "POS %s %s\n" % (current.name, tool))
 
-                            pos_msg = self._get_cmd(current)
-                            if pos_msg is None:
-                                continue
+                        pos_msg = self._get_cmd(current)
+                        if pos_msg is None:
+                            continue
 
-                            pos = int(pos_msg["data"])
-                            if len(self.players) < 2:
-                                ConnectionManager.send_to(current, "WINNER\n")
-                                return
+                        pos = int(pos_msg["data"])
+                        if len(self.players) < 2:
+                            ConnectionManager.send_to(current, "WINNER\n")
+                            return
 
-                            opponent = self.players[(idx + 1) % 2]
-                            digit = ToolCard.pos(opponent.answer, pos)
-                            print(format_log("%s - POS_RESULT" % current.name))
-                            ConnectionManager.send_to(current, "POS_RESULT %d %s\n" % (pos, digit))
+                        opponent = self.players[(idx + 1) % 2]
+                        digit = ToolCard.pos(opponent.answer, pos)
+                        print(format_log("%s - POS_RESULT" % current.name))
+                        ConnectionManager.send_to(current, "POS_RESULT %d %s\n" % (pos, digit))
 
-                        elif tool == "SHUFFLE":
-                            ToolCard.shuffle(current.answer)
-                            print(format_log("%s - SHUFFLE_RESULT" % current.name))
-                            ConnectionManager.send_to(current, "SHUFFLE_RESULT %s\n" % "".join(current.answer))
+                    elif tool == "SHUFFLE":
+                        ToolCard.shuffle(current.answer)
+                        print(format_log("%s - SHUFFLE_RESULT" % current.name))
+                        ConnectionManager.send_to(current, "SHUFFLE_RESULT %s\n" % "".join(current.answer))
 
-                        elif tool == "EXCLUDE":
-                            if len(self.players) < 2:
-                                ConnectionManager.send_to(current, "WINNER\n")
-                                return
-                            opponent = self.players[(idx + 1) % 2]
-                            exclude_result = ToolCard.exclude(opponent.answer)
-                            print(format_log("%s - EXCLUDE_RESULT" % current.name))
-                            ConnectionManager.send_to(current, "EXCLUDE_RESULT %s\n" % exclude_result)
+                    elif tool == "EXCLUDE":
+                        if len(self.players) < 2:
+                            ConnectionManager.send_to(current, "WINNER\n")
+                            return
+                        opponent = self.players[(idx + 1) % 2]
+                        exclude_result = ToolCard.exclude(opponent.answer)
+                        print(format_log("%s - EXCLUDE_RESULT" % current.name))
+                        ConnectionManager.send_to(current, "EXCLUDE_RESULT %s\n" % exclude_result)
 
-                        elif tool == "DOUBLE":
-                            extra_guess = True
-                            print(format_log("%s - DOUBLE_ACTIVE" % current.name))
-                            ConnectionManager.send_to(current, "DOUBLE_ACTIVE\n")
+                    elif tool == "DOUBLE":
+                        extra_guess = True
+                        print(format_log("%s - DOUBLE_ACTIVE" % current.name))
+                        ConnectionManager.send_to(current, "DOUBLE_ACTIVE\n")
 
-                        elif tool == "RESHUFFLE":
-                            ToolCard.reshuffle(current.number_hand, game.number_deck)
-                            print(format_log("%s - RESHUFFLE_DONE" % current.name))
-                            ConnectionManager.send_to(current, "RESHUFFLE_DONE\n")
+                    elif tool == "RESHUFFLE":
+                        ToolCard.reshuffle(current.number_hand, game.number_deck)
+                        print(format_log("%s - RESHUFFLE_DONE" % current.name))
+                        ConnectionManager.send_to(current, "RESHUFFLE_DONE\n")
 
                 # 猜測階段
                 guesses = 2 if extra_guess else 1
@@ -358,6 +368,7 @@ class GameSession(object):
                     print(format_log("%s - HAND" % current.name))
                     ConnectionManager.send_to(current, "HAND %s;%s\n" % (nums, tools))
                     print(format_log("%s - GUESS" % current.name))
+                    current.add_action_history(action=("GUESS %s\n" % nums))
                     ConnectionManager.send_to(current, "GUESS %s\n" % nums)
 
                     guess_msg = self._get_cmd(current)
@@ -372,6 +383,8 @@ class GameSession(object):
                     game.draw_up(current)
                     a, b = game.check_guess(opponent.answer, list(guess))
                     print(format_log("%s - RESULT" % current.name))
+                    # RESULT 必須存放，否則GUESS如果玩家有猜完，在重連後會
+                    current.add_action_history(action="RESULT %d %d\n" % (a, b))
                     ConnectionManager.send_to(current, "RESULT %d %d\n" % (a, b))
                     print(format_log("%s - OPP_GUESS" % opponent.name))
                     ConnectionManager.send_to(opponent, "OPP_GUESS %s %s %d %d\n" % (current.name, guess, a, b))

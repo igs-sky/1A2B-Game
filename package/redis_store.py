@@ -2,7 +2,8 @@
 import redis
 import json
 
-from package.utils import safe_call
+from package.utils import safe_call, format_log
+
 
 class RedisStore(object):
     def __init__(self, host='localhost', port=6379, db=0):
@@ -63,7 +64,6 @@ class RedisStore(object):
     @safe_call
     def save_game_state(self, game_session_id, game_state_dict):
         key = self._game_key(game_session_id)
-        # print(game_state_dict)
         self.r.set(key, json.dumps(game_state_dict))
 
     @safe_call
@@ -78,6 +78,10 @@ class RedisStore(object):
     def delete_game_state(self, game_session_id):
         key = self._game_key(game_session_id)
         game_data = self.read_game_state(game_session_id)
+        if game_data is None:
+            print(format_log("Game state not found when deleting."))
+            return
+
         for p in game_data["players"]:
             self.delete_player_game(p["name"])
         self.r.delete(key)
